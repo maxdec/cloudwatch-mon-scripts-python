@@ -29,6 +29,8 @@ import random
 import re
 import sys
 import time
+import urllib2
+import socket
 
 CLIENT_NAME = 'CloudWatch-PutInstanceData'
 FileCache.CLIENT_NAME = CLIENT_NAME
@@ -125,6 +127,29 @@ class Disk:
         self.avail = avail
         self.util = 100.0 * used / total if total > 0 else 0
 
+class Ping:
+    def __init__(self, url, timeout):
+        self.url = url
+        self.timeout = timeout
+        ping_info = self.__gather_ping_info(url, timeout)
+        self.latency = ping_info['Latency']
+        self.status_code = ping_info['StatusCode']
+
+    @staticmethod
+    def __gather_ping_info(url, timeout):
+        start = time.time()
+        try:
+            code = urllib2.urlopen(url, timeout = timeout).getcode()
+        except urllib2.URLError, e:
+            code = 500
+        except socket.timeout, e:
+            code = 524 # "A Timeout Occurred"
+
+        end = time.time()
+        return {
+            'Latency': end - start,
+            'StatusCode': code
+        }
 
 class Metrics:
     def __init__(self, region, instance_id, instance_type, image_id,
@@ -140,13 +165,7 @@ class Metrics:
         self.aggregated = aggregated
         self.autoscaling_group_name = autoscaling_group_name
 
-    def add_metric(self, name, unit, value, mount=None, file_system=None):
-        common_dims = {}
-        if mount:
-            common_dims['MountPath'] = mount
-        if file_system:
-            common_dims['Filesystem'] = file_system
-
+    def add_metric(self, name, unit, value, common_dims = {}):
         dims = []
 
         if self.aggregated != 'only':
@@ -302,6 +321,17 @@ https://github.com/osiegmar/cloudwatch-mon-scripts-python
                             choices=size_units,
                             help='Specifies units for disk space metrics.')
 
+    ping_group = parser.add_argument_group('ping metrics')
+    ping_group.add_argument('--ping-url',
+                            metavar='PING_URL',
+                            action='append',
+                            help='Selects the URL on which to report status and latency (e.g. http://example.com:8080/ping).')
+    ping_group.add_argument('--ping-timeout',
+                            metavar='PING_TIMEOUT',
+                            type=int,
+                            default=10,
+                            help='Selects the timeout in seconds after which the ping fails (e.g. 10).')
+
     exclusive_group = parser.add_mutually_exclusive_group()
     exclusive_group.add_argument('--from-cron',
                                  action='store_true',
@@ -386,17 +416,16 @@ def add_disk_metrics(args, metrics):
     disk_unit_div = float(SIZE_UNITS_CFG[args.disk_space_units]['div'])
     disks = get_disk_info(args.disk_path)
     for disk in disks:
+        common_dims = {'MountPath': disk.mount, 'Filesystem': disk.file_system}
         if args.disk_space_util:
             metrics.add_metric('DiskSpaceUtilization', 'Percent',
-                               disk.util, disk.mount, disk.file_system)
+                               disk.util, common_dims)
         if args.disk_space_used:
             metrics.add_metric('DiskSpaceUsed', disk_unit_name,
-                               disk.used / disk_unit_div,
-                               disk.mount, disk.file_system)
+                               disk.used / disk_unit_div, common_dims)
         if args.disk_space_avail:
             metrics.add_metric('DiskSpaceAvailable', disk_unit_name,
-                               disk.avail / disk_unit_div,
-                               disk.mount, disk.file_system)
+                               disk.avail / disk_unit_div, common_dims)
 
 
 def add_static_file_metrics(args, metrics):
@@ -409,6 +438,13 @@ def add_static_file_metrics(args, metrics):
                 print 'Ignore unparseable metric: "' + line + '"'
                 pass
 
+def add_ping_metrics(args, metrics):
+    for url in args.ping_url:
+        ping = Ping(url, args.ping_timeout)
+        common_dims = {'Url': url}
+        latency = ping.latency if ping.status_code == 200 else 0
+        metrics.add_metric('PingLatency', 'Seconds', latency, common_dims)
+        # metrics.add_metric('PingStatus', ping.status_code, ping.status_code == 200, common_dims)
 
 @FileCache
 def get_autoscaling_group_name(region, instance_id, verbose):
@@ -433,6 +469,7 @@ def validate_args(args):
         args.swap_util or args.swap_used
     report_disk_data = args.disk_path is not None
     report_loadavg_data = args.loadavg or args.loadavg_percpu
+    report_ping_data = args.ping_url
 
     if report_disk_data:
         if not args.disk_space_util and not args.disk_space_used and \
@@ -450,11 +487,11 @@ def validate_args(args):
                          'disk path is not specified.')
 
     if not report_mem_data and not report_disk_data and not args.from_file and \
-            not report_loadavg_data:
+            not report_loadavg_data and not report_ping_data:
         raise ValueError('No metrics specified for collection and '
                          'submission to CloudWatch.')
 
-    return report_disk_data, report_mem_data, report_loadavg_data
+    return report_disk_data, report_mem_data, report_loadavg_data, report_ping_data
 
 
 def main():
@@ -472,7 +509,7 @@ def main():
         return 0
 
     try:
-        report_disk_data, report_mem_data, report_loadavg_data = validate_args(args)
+        report_disk_data, report_mem_data, report_loadavg_data, report_ping_data = validate_args(args)
 
         # avoid a storm of calls at the beginning of a minute
         if args.from_cron:
@@ -516,6 +553,9 @@ def main():
 
         if report_disk_data:
             add_disk_metrics(args, metrics)
+
+        if report_ping_data:
+            add_ping_metrics(args, metrics)
 
         if args.verbose:
             print 'Request:\n' + str(metrics)
