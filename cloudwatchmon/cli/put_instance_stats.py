@@ -325,6 +325,9 @@ https://github.com/osiegmar/cloudwatch-mon-scripts-python
     parser.add_argument('--verify',
                         action='store_true',
                         help='Checks configuration and prepares a remote call.')
+    parser.add_argument('--no-ec2',
+                        action='store_true',
+                        help='Returns fake AWS metadata. Used when running on a machine outside EC2.')
     parser.add_argument('--version',
                         action='store_true',
                         help='Displays the version number and exits.')
@@ -479,7 +482,7 @@ def main():
             print 'Working in verbose mode'
             print 'Boto-Version: ' + boto.__version__
 
-        metadata = get_metadata()
+        metadata = get_metadata(args.no_ec2)
 
         if args.verbose:
             print 'Instance metadata: ' + str(metadata)

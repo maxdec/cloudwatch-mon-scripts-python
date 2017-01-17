@@ -70,7 +70,15 @@ def log_error(message, use_syslog):
 
 
 @FileCache
-def get_metadata():
+def get_metadata(no_ec2):
+    if no_ec2:
+        return {
+            'placement': {'availability-zone': ['eu-central-1']},
+            'instance-id': 'instance-123',
+            'instance-type': 'custom',
+            'ami-id': 'ami-123'
+        }
+
     metadata = boto.utils.get_instance_metadata(timeout=1, num_retries=2)
     if not metadata:
         raise ValueError('Cannot obtain EC2 metadata.')
